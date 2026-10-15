@@ -204,6 +204,11 @@ pub(super) struct PathData {
     /// Initially equal to `use_stateless_retry` for servers, and becomes false again on every
     /// migration. Always true for clients.
     pub(super) validated: bool,
+    /// Whether this network path replaced the path's previous one in a migration and has not
+    /// been validated yet.
+    ///
+    /// Cleared once path validation succeeds, which emits [`PathEvent::Migrated`].
+    pub(super) unvalidated_migration: bool,
     /// Total size of all UDP datagrams sent on this path
     pub(super) total_sent: u64,
     /// Total size of all UDP datagrams received on this path
@@ -315,6 +320,7 @@ impl PathData {
             lost_challenge_count: 0,
             pending_challenge: false,
             validated: false,
+            unvalidated_migration: false,
             total_sent: 0,
             total_recvd: 0,
             mtud: config
@@ -377,6 +383,7 @@ impl PathData {
             lost_challenge_count: 0,
             pending_challenge: false,
             validated: false,
+            unvalidated_migration: false,
             total_sent: 0,
             total_recvd: 0,
             mtud: prev.mtud.clone(),
@@ -1087,6 +1094,19 @@ pub enum PathEvent {
         id: PathId,
         /// The address observed by the remote over this path
         addr: SocketAddr,
+    },
+    /// The path migrated to a new network path, which has now been validated.
+    ///
+    /// A path migrates in place, keeping its [`PathId`], when the peer's packets start
+    /// arriving from a new address, e.g. after a NAT rebinding (RFC9000 §9.3). This is only
+    /// emitted once path validation proved the peer is reachable on the new network path, so
+    /// a migration triggered by a spoofed source address never surfaces.
+    #[non_exhaustive]
+    Migrated {
+        /// The path which migrated
+        id: PathId,
+        /// The validated network path the path now uses
+        network_path: FourTuple,
     },
 }
 

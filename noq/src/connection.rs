@@ -474,6 +474,15 @@ impl Connection {
         Path::new(&self.0, id)
     }
 
+    /// Returns the paths that are not abandoned, each with the network path it was last
+    /// validated on.
+    ///
+    /// Use this to recover the state of the paths after [`Self::path_events`] lagged. See
+    /// [`proto::Connection::open_paths`] for details.
+    pub fn open_paths(&self) -> Vec<(PathId, Option<FourTuple>)> {
+        self.0.lock_without_waking("open_paths").inner.open_paths()
+    }
+
     /// A stream of [`PathEvent`]s for all paths in this connection.
     ///
     /// The stream will yield a [`PathEvent`] whenever there is a change in the state of any path in this connection.
@@ -1679,6 +1688,9 @@ impl State {
                     self.path_events.send(evt.clone()).ok();
                 }
                 Path(evt @ PathEvent::RemoteStatus { .. }) => {
+                    self.path_events.send(evt).ok();
+                }
+                Path(evt @ PathEvent::Migrated { .. }) => {
                     self.path_events.send(evt).ok();
                 }
                 NatTraversal(update) => {

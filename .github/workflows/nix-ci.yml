@@ -1,0 +1,124 @@
+# Core checks for this fork, run inside the flake's dev shell (`nix develop`) on
+# GitHub-hosted runners so CI uses the same toolchain as local development.
+
+name: Nix CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "pre-release/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -Dwarnings
+  RUSTDOCFLAGS: -Dwarnings
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - run: nix develop -c cargo make format-check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop -c {0}
+      - name: clippy (all features)
+        run: nix develop -c cargo clippy --locked --workspace --exclude fuzz --all-targets --all-features
+      - name: clippy (no features)
+        run: nix develop -c cargo clippy --locked --workspace --exclude fuzz --all-targets --no-default-features
+      - name: clippy (default features)
+        run: nix develop -c cargo clippy --locked --workspace --exclude fuzz --all-targets
+
+  test:
+    name: Test (${{ matrix.features }} features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: all
+            flags: --all-features
+          - features: no
+            flags: --no-default-features
+          - features: default
+            flags: ""
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+          cmd-format: nix develop -c {0}
+      - name: tests
+        run: nix develop -c cargo nextest run --locked --workspace --exclude fuzz --lib --bins --tests --profile ci ${{ matrix.flags }}
+      - name: doctests
+        run: nix develop -c cargo test --locked -p noq -p noq-proto -p noq-udp --doc ${{ matrix.flags }}
+
+  proptests:
+    name: Proptests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop -c {0}
+      - run: nix develop -c cargo make proptests-light
+
+  aws-lc-rs:
+    name: Test aws-lc-rs crypto backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop -c {0}
+      # Prevent feature unification from selecting *ring* as the crypto provider
+      - run: nix develop -c cargo test --locked --manifest-path noq-proto/Cargo.toml --no-default-features --features rustls,aws-lc-rs
+      - run: nix develop -c cargo test --locked --manifest-path noq/Cargo.toml --no-default-features --features rustls,aws-lc-rs,runtime-tokio,__rustls-post-quantum-test
+      # FIPS
+      - run: nix develop -c cargo test --locked --manifest-path noq-proto/Cargo.toml --no-default-features --features rustls,aws-lc-rs-fips
+      - run: nix develop -c cargo test --locked --manifest-path noq/Cargo.toml --no-default-features --features rustls,aws-lc-rs-fips,runtime-tokio,__rustls-post-quantum-test
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop -c {0}
+      - run: nix develop -c cargo doc --locked --workspace --all-features --no-deps --document-private-items

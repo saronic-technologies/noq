@@ -813,6 +813,37 @@ impl Connection {
             .ok_or(ClosedPath { _private: () })
     }
 
+    /// Returns the paths that are not abandoned, each with the network path it was last
+    /// validated on.
+    ///
+    /// This is the synchronous counterpart of the [`PathEvent`]s, for applications that missed
+    /// some of them. The network path is `None` until the path is established
+    /// ([`PathEvent::Established`]; [`PathId::ZERO`] is established from the start). While a
+    /// migration to a new network path awaits validation ([`PathEvent::Migrated`]), the
+    /// previous validated network path is reported, or `None` if there is none.
+    pub fn open_paths(&self) -> Vec<(PathId, Option<FourTuple>)> {
+        self.paths
+            .iter()
+            .filter(|(path_id, _)| !self.abandoned_paths.contains(path_id))
+            .map(|(path_id, path)| {
+                let established = self.spaces[SpaceKind::Data]
+                    .path_space(*path_id)
+                    .is_some_and(|space| matches!(space.open_status, OpenStatus::Informed));
+                let network_path = if !established {
+                    None
+                } else if path.data.validated {
+                    Some(path.data.network_path)
+                } else {
+                    path.prev
+                        .as_ref()
+                        .filter(|(_, prev)| prev.validated)
+                        .map(|(_, prev)| prev.network_path)
+                };
+                (*path_id, network_path)
+            })
+            .collect()
+    }
+
     /// Sets the [`PathStatus`] for a known [`PathId`]
     ///
     /// Returns the previous path status on success.
@@ -1704,7 +1735,7 @@ impl Connection {
                 pad_datagram |= PadDatagram::ToMinMtu;
             }
 
-            for (path_id, _pn) in builder.sent_frames().largest_acked.iter() {
+            for path_id in builder.sent_frames().largest_acked.keys() {
                 self.spaces[space_id]
                     .for_path(*path_id)
                     .pending_acks
@@ -5653,6 +5684,12 @@ impl Connection {
                     // re-validate the previous path.
                     prev.reset_on_path_challenges();
                 }
+                if mem::take(&mut path.data.unvalidated_migration) {
+                    self.events.push_back(Event::Path(PathEvent::Migrated {
+                        id: path_id,
+                        network_path: path.data.network_path,
+                    }));
+                }
             }
             paths::OnPathResponseReceived::OnPath => {
                 trace!(
@@ -5772,6 +5809,8 @@ impl Connection {
             }));
         }
         new_path_data.pending_challenge = true;
+        // Announced as `PathEvent::Migrated` once the challenge validates the new network path.
+        new_path_data.unvalidated_migration = true;
         new_path_data.pending.observed_address = self
             .config
             .address_discovery_role
@@ -5787,7 +5826,7 @@ impl Connection {
         // yet. In this case we would never have sent on this path yet and would not be able
         // to send a PATH_CHALLENGE either, which is currently a fire-and-forget affair
         // anyway. So don't store such a path either.
-        if !prev_path_data.validated
+        if prev_path_data.validated
             && let Some(cid) = self.remote_cids.get(&path_id).map(CidQueue::active)
         {
             prev_path_data.pending_challenge = true;
