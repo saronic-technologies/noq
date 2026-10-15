@@ -1681,6 +1681,9 @@ impl State {
                 Path(evt @ PathEvent::RemoteStatus { .. }) => {
                     self.path_events.send(evt).ok();
                 }
+                Path(evt @ PathEvent::Migrated { .. }) => {
+                    self.path_events.send(evt).ok();
+                }
                 NatTraversal(update) => {
                     self.nat_traversal_updates.send(update).ok();
                 }

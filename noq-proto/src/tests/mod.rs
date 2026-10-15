@@ -1506,6 +1506,91 @@ fn migration() {
     );
 }
 
+/// A passive migration, e.g. a NAT rebinding, is announced with [`PathEvent::Migrated`]
+/// carrying the new network path, but only once path validation succeeded.
+#[test]
+fn migration_announced_once_validated() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+    let migrated = |e: &Event| matches!(e, Event::Path(PathEvent::Migrated { .. }));
+    let mut events = Vec::new();
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+    assert!(events.is_empty(), "unexpected migration: {events:?}");
+
+    let client_addr = pair.routes.as_basic_mut().passive_migration(Client);
+    pair.client_conn_mut(client_ch).ping();
+
+    // The server migrates on the client's first packet from the new address and challenges
+    // it, but announces nothing until the client answered.
+    pair.drive_client();
+    pair.drive_server();
+    assert_eq!(
+        pair.server_conn_mut(server_ch)
+            .network_path(PathId::ZERO)
+            .map(|path| path.remote),
+        Ok(client_addr)
+    );
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+    assert!(events.is_empty(), "announced before validation: {events:?}");
+
+    pair.drive();
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+    assert_matches!(
+        events.as_slice(),
+        [Event::Path(PathEvent::Migrated { id: PathId::ZERO, network_path })]
+            if network_path.remote == client_addr
+    );
+}
+
+/// A migration whose first validation attempt fails, e.g. under heavy loss while a NAT rebinds,
+/// is announced once the new network path does validate, and never before.
+#[test]
+fn migration_announced_after_failed_validation() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+    let migrated = |e: &Event| matches!(e, Event::Path(PathEvent::Migrated { .. }));
+    let mut events = Vec::new();
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+
+    let client_addr = pair.routes.as_basic_mut().passive_migration(Client);
+    pair.client_conn_mut(client_ch).ping();
+
+    // Lose everything the server sends for far longer than its path validation timeout (3 PTO)
+    // but well within the idle timeout. Time never jumps past the heal point, so a far-off
+    // timer can't idle the connection out.
+    let heal_at = pair.time + Duration::from_secs(2);
+    while pair.time < heal_at {
+        pair.drive_client();
+        pair.drive_server();
+        pair.client.inbound.clear();
+        let next = util::min_opt(pair.client.next_wakeup(), pair.server.next_wakeup());
+        pair.time = next.map_or(heal_at, |t| t.min(heal_at)).max(pair.time);
+    }
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+    assert!(
+        events.is_empty(),
+        "announced without validation: {events:?}"
+    );
+
+    pair.drive();
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+    assert_matches!(
+        events.as_slice(),
+        [Event::Path(PathEvent::Migrated { id: PathId::ZERO, network_path })]
+            if network_path.remote == client_addr
+    );
+}
+
 #[test]
 fn path_challenge_retransmit() {
     let _guard = subscribe();
@@ -4023,7 +4108,7 @@ fn network_change_single_path_recovery() {
     let cid_seq_before = pair.conn(Client).active_remote_cid_seq();
 
     // Simulate a passive migration (port change) + network change notification
-    pair.routes.as_basic_mut().passive_migration(Client);
+    let client_addr = pair.routes.as_basic_mut().passive_migration(Client);
     pair.handle_network_change(Client, None);
 
     // The path should NOT be closed and there should be no path events
@@ -4044,6 +4129,12 @@ fn network_change_single_path_recovery() {
     pair.send_stream(Client, s).finish().unwrap();
     pair.drive();
 
+    // The server followed the client to its new address once it validated it.
+    assert_matches!(
+        pair.poll(Server),
+        Some(Event::Path(PathEvent::Migrated { id: PathId::ZERO, network_path }))
+            if network_path.remote == client_addr
+    );
     assert_matches!(
         pair.poll(Server),
         Some(Event::Stream(StreamEvent::Opened { dir: Dir::Uni }))
