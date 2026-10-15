@@ -1591,6 +1591,45 @@ fn migration_announced_after_failed_validation() {
     );
 }
 
+/// [`Connection::open_paths`] only reports validated network paths: during a migration it keeps
+/// reporting the previous network path, until the new one validates.
+#[test]
+fn open_paths_reports_last_validated_network_path() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+    let before = pair
+        .server_conn_mut(server_ch)
+        .network_path(PathId::ZERO)
+        .unwrap();
+    assert_eq!(
+        pair.server_conn_mut(server_ch).open_paths(),
+        [(PathId::ZERO, Some(before))]
+    );
+
+    let client_addr = pair.routes.as_basic_mut().passive_migration(Client);
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    pair.drive_server();
+    let migrated = pair
+        .server_conn_mut(server_ch)
+        .network_path(PathId::ZERO)
+        .unwrap();
+    assert_eq!(migrated.remote, client_addr);
+    assert_eq!(
+        pair.server_conn_mut(server_ch).open_paths(),
+        [(PathId::ZERO, Some(before))],
+        "reported the network path before validation"
+    );
+
+    pair.drive();
+    assert_eq!(
+        pair.server_conn_mut(server_ch).open_paths(),
+        [(PathId::ZERO, Some(migrated))]
+    );
+}
+
 #[test]
 fn path_challenge_retransmit() {
     let _guard = subscribe();

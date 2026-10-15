@@ -813,6 +813,37 @@ impl Connection {
             .ok_or(ClosedPath { _private: () })
     }
 
+    /// Returns the paths that are not abandoned, each with the network path it was last
+    /// validated on.
+    ///
+    /// This is the synchronous counterpart of the [`PathEvent`]s, for applications that missed
+    /// some of them. The network path is `None` until the path is established
+    /// ([`PathEvent::Established`]; [`PathId::ZERO`] is established from the start). While a
+    /// migration to a new network path awaits validation ([`PathEvent::Migrated`]), the
+    /// previous validated network path is reported, or `None` if there is none.
+    pub fn open_paths(&self) -> Vec<(PathId, Option<FourTuple>)> {
+        self.paths
+            .iter()
+            .filter(|(path_id, _)| !self.abandoned_paths.contains(path_id))
+            .map(|(path_id, path)| {
+                let established = self.spaces[SpaceKind::Data]
+                    .path_space(*path_id)
+                    .is_some_and(|space| matches!(space.open_status, OpenStatus::Informed));
+                let network_path = if !established {
+                    None
+                } else if path.data.validated {
+                    Some(path.data.network_path)
+                } else {
+                    path.prev
+                        .as_ref()
+                        .filter(|(_, prev)| prev.validated)
+                        .map(|(_, prev)| prev.network_path)
+                };
+                (*path_id, network_path)
+            })
+            .collect()
+    }
+
     /// Sets the [`PathStatus`] for a known [`PathId`]
     ///
     /// Returns the previous path status on success.

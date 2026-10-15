@@ -606,6 +606,45 @@ fn close_path() -> TestResult {
     Ok(())
 }
 
+/// [`Connection::open_paths`] reports the network path of a path only once it is established,
+/// and stops reporting a path once it is abandoned.
+///
+/// [`Connection::open_paths`]: crate::Connection::open_paths
+#[test]
+fn open_paths_established_and_abandoned() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let path_zero = pair.network_path(Client, PathId::ZERO)?;
+
+    let server_addr = pair.routes.public_server_addr();
+    let path_id = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Available,
+    )?;
+    assert_eq!(
+        pair.conn(Client).open_paths(),
+        [(PathId::ZERO, Some(path_zero)), (path_id, None)]
+    );
+
+    pair.drive();
+    let network_path = pair.network_path(Client, path_id)?;
+    assert_eq!(
+        pair.conn(Client).open_paths(),
+        [
+            (PathId::ZERO, Some(path_zero)),
+            (path_id, Some(network_path))
+        ]
+    );
+
+    pair.close_path(Client, PathId::ZERO, 0u8.into())?;
+    assert_eq!(
+        pair.conn(Client).open_paths(),
+        [(path_id, Some(network_path))]
+    );
+    Ok(())
+}
+
 /// Regression: We never emit [`PathEvent::Established`] after [`PathEvent::Abandoned`].
 ///
 /// It may happen that a PATH_RESPONSE validating a path is received after a
