@@ -5598,20 +5598,32 @@ impl Connection {
             && self.local_ip_may_migrate()
             && let Some(new_local_ip) = network_path.local_ip
         {
+            // A migration of the remote starting with this packet announces its network
+            // path, this local IP included, once it validates.
+            let remote_migrates = self.peer_may_migrate()
+                && network_path.remote != self.path_data(path_id).network_path.remote;
             let path_data = self.path_data_mut(path_id);
-            if path_data
-                .network_path
-                .local_ip
-                .is_some_and(|ip| ip != new_local_ip)
-            {
+            path_data.network_path.local_ip = Some(new_local_ip);
+            let prev_local_ip = path_data.last_local_ip.replace(new_local_ip);
+            // Learning the first local IP, or re-learning the one a network change cleared,
+            // changes nothing for the peer. Moving to another one does: announce it, so that
+            // anyone else sending on this network path follows. A pending migration of the
+            // remote announces the whole network path once validated instead.
+            if prev_local_ip.is_some_and(|ip| ip != new_local_ip) {
                 debug!(
                     %path_id,
                     new_4tuple = %network_path,
-                    prev_4tuple = %path_data.network_path,
+                    prev_local_ip = ?prev_local_ip,
                     "local address passive migration"
                 );
+                if !remote_migrates && !path_data.unvalidated_migration {
+                    let network_path = path_data.network_path;
+                    self.events.push_back(Event::Path(PathEvent::Migrated {
+                        id: path_id,
+                        network_path,
+                    }));
+                }
             }
-            path_data.network_path.local_ip = Some(new_local_ip)
         }
 
         // If the peer migrated to a new address, trigger migration.

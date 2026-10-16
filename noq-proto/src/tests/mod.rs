@@ -1484,6 +1484,13 @@ fn migration() {
     assert_ne!(pair.server_conn_mut(server_ch).total_recvd(), 0);
 
     pair.drive();
+    // The server's packets now reach the client on its new address, which the client now
+    // sends from and announces.
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::Path(PathEvent::Migrated { id: PathId::ZERO, network_path }))
+            if network_path.local_ip == Some(client_addr.ip())
+    );
     assert_matches!(pair.client_conn_mut(client_ch).poll(), None);
     assert_eq!(
         pair.server_conn_mut(server_ch)
@@ -4150,8 +4157,14 @@ fn network_change_single_path_recovery() {
     let client_addr = pair.routes.as_basic_mut().passive_migration(Client);
     pair.handle_network_change(Client, None);
 
-    // The path should NOT be closed and there should be no path events
+    // The path should NOT be closed or replaced. Its only event is the client announcing the
+    // new local IP it learns once the server's packets reach its new address.
     pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Migrated { id: PathId::ZERO, network_path }))
+            if network_path.local_ip == Some(client_addr.ip())
+    );
     assert_matches!(pair.poll(Client), None);
 
     // CID should have been rotated
@@ -4186,6 +4199,31 @@ fn network_change_single_path_recovery() {
         Ok(Some(chunk)) if chunk.bytes == MSG
     );
     let _ = chunks.finalize();
+}
+
+/// Learning a path's first local IP is not announced, and neither is re-learning the same
+/// one after a network change cleared it: the peer still sends to it.
+#[test]
+fn network_change_relearning_same_local_ip_is_silent() {
+    let _guard = subscribe();
+    let mut pair = ConnPair::default();
+    pair.drive();
+    let local_ip = |pair: &ConnPair| {
+        pair.conn(Client)
+            .network_path(PathId::ZERO)
+            .unwrap()
+            .local_ip
+    };
+    let learned = local_ip(&pair);
+    assert!(learned.is_some(), "the client learned its local IP");
+    assert_matches!(pair.poll(Client), None);
+
+    pair.handle_network_change(Client, None);
+    assert_eq!(local_ip(&pair), None, "the network change cleared it");
+    pair.drive();
+
+    assert_eq!(local_ip(&pair), learned, "the client re-learned it");
+    assert_matches!(pair.poll(Client), None);
 }
 
 /// Verify that dropping oversized datagrams will trigger a DatagramsUnblocked event.

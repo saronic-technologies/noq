@@ -1,4 +1,7 @@
-use std::{cmp, net::SocketAddr};
+use std::{
+    cmp,
+    net::{IpAddr, SocketAddr},
+};
 
 use identity_hash::IntMap;
 use thiserror::Error;
@@ -209,6 +212,11 @@ pub(super) struct PathData {
     ///
     /// Cleared once path validation succeeds, which emits [`PathEvent::Migrated`].
     pub(super) unvalidated_migration: bool,
+    /// The local IP this network path last sent from, kept when a network change clears
+    /// `network_path.local_ip` for the OS to pick the source until packets teach it again.
+    ///
+    /// Learning a different local IP from incoming packets emits [`PathEvent::Migrated`].
+    pub(super) last_local_ip: Option<IpAddr>,
     /// Total size of all UDP datagrams sent on this path
     pub(super) total_sent: u64,
     /// Total size of all UDP datagrams received on this path
@@ -321,6 +329,7 @@ impl PathData {
             pending_challenge: false,
             validated: false,
             unvalidated_migration: false,
+            last_local_ip: network_path.local_ip,
             total_sent: 0,
             total_recvd: 0,
             mtud: config
@@ -384,6 +393,7 @@ impl PathData {
             pending_challenge: false,
             validated: false,
             unvalidated_migration: false,
+            last_local_ip: network_path.local_ip.or(prev.last_local_ip),
             total_sent: 0,
             total_recvd: 0,
             mtud: prev.mtud.clone(),
@@ -1095,17 +1105,23 @@ pub enum PathEvent {
         /// The address observed by the remote over this path
         addr: SocketAddr,
     },
-    /// The path migrated to a new network path, which has now been validated.
+    /// The path migrated to a new network path, keeping its [`PathId`].
     ///
-    /// A path migrates in place, keeping its [`PathId`], when the peer's packets start
-    /// arriving from a new address, e.g. after a NAT rebinding (RFC9000 §9.3). This is only
-    /// emitted once path validation proved the peer is reachable on the new network path, so
-    /// a migration triggered by a spoofed source address never surfaces.
+    /// A path migrates in place when the peer's packets start arriving from a new address,
+    /// e.g. after a NAT rebinding (RFC9000 §9.3). This is only emitted once path validation
+    /// proved the peer is reachable on the new network path, so a migration triggered by a
+    /// spoofed source address never surfaces.
+    ///
+    /// It is also emitted when only the local IP changes, the remote staying validated: the
+    /// peer's packets started arriving on another of our addresses, which we now send from.
+    /// Learning the first local IP of a path is not a change, and neither is re-learning the
+    /// one a network change cleared. Anyone sending on this network path outside of the
+    /// connection must follow the local IP to keep the 4-tuple the peer knows.
     #[non_exhaustive]
     Migrated {
         /// The path which migrated
         id: PathId,
-        /// The validated network path the path now uses
+        /// The network path the path now uses
         network_path: FourTuple,
     },
 }
