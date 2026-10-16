@@ -1598,6 +1598,45 @@ fn migration_announced_after_failed_validation() {
     );
 }
 
+/// A migration validated after a network change cleared the local IP is announced with the
+/// local IP the path last used, not without one.
+#[test]
+fn migration_announced_with_local_ip_after_network_change() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+    let server_ip = pair
+        .server_conn_mut(server_ch)
+        .network_path(PathId::ZERO)
+        .unwrap()
+        .local_ip;
+    assert!(server_ip.is_some(), "the server knows its local IP");
+    let migrated = |e: &Event| matches!(e, Event::Path(PathEvent::Migrated { .. }));
+    let mut events = Vec::new();
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+
+    // The server migrates and challenges the client's new address, then its network changes
+    // before the client's response validates the migration.
+    let client_addr = pair.routes.as_basic_mut().passive_migration(Client);
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    pair.drive_server();
+    let now = pair.time;
+    pair.server_conn_mut(server_ch)
+        .handle_network_change(None, now);
+
+    pair.drive();
+    pair.server_conn_mut(server_ch)
+        .poll_until_none(migrated, &mut events);
+    assert_matches!(
+        events.as_slice(),
+        [Event::Path(PathEvent::Migrated { id: PathId::ZERO, network_path })]
+            if network_path.remote == client_addr && network_path.local_ip == server_ip
+    );
+}
+
 /// [`Connection::open_paths`] only reports validated network paths: during a migration it keeps
 /// reporting the previous network path, until the new one validates.
 #[test]
@@ -4202,27 +4241,57 @@ fn network_change_single_path_recovery() {
 }
 
 /// Learning a path's first local IP is not announced, and neither is re-learning the same
-/// one after a network change cleared it: the peer still sends to it.
+/// one after a network change cleared it: the peer still sends to it. Meanwhile the path
+/// keeps reporting it.
 #[test]
 fn network_change_relearning_same_local_ip_is_silent() {
     let _guard = subscribe();
     let mut pair = ConnPair::default();
     pair.drive();
-    let local_ip = |pair: &ConnPair| {
-        pair.conn(Client)
-            .network_path(PathId::ZERO)
-            .unwrap()
-            .local_ip
-    };
-    let learned = local_ip(&pair);
-    assert!(learned.is_some(), "the client learned its local IP");
+    let network_path = pair.conn(Client).network_path(PathId::ZERO).unwrap();
+    assert!(
+        network_path.local_ip.is_some(),
+        "the client learned its local IP"
+    );
     assert_matches!(pair.poll(Client), None);
+    // The source IPs of the datagrams the client sends next.
+    let next_src_ips = |pair: &mut ConnPair| {
+        let now = pair.time;
+        pair.client.drive(now);
+        let src_ips: Vec<_> = pair
+            .client
+            .outbound
+            .iter()
+            .map(|(transmit, _)| transmit.src_ip)
+            .collect();
+        assert!(!src_ips.is_empty(), "the client sends");
+        src_ips
+    };
 
     pair.handle_network_change(Client, None);
-    assert_eq!(local_ip(&pair), None, "the network change cleared it");
+    assert!(
+        next_src_ips(&mut pair).iter().all(Option::is_none),
+        "the network change has the OS pick the source"
+    );
+    assert_eq!(
+        pair.conn(Client).network_path(PathId::ZERO),
+        Ok(network_path),
+        "reported with the local IP it last used"
+    );
+    assert_eq!(
+        pair.conn(Client).open_paths(),
+        [(PathId::ZERO, Some(network_path))]
+    );
     pair.drive();
 
-    assert_eq!(local_ip(&pair), learned, "the client re-learned it");
+    pair.conn_mut(Client).ping();
+    assert!(
+        next_src_ips(&mut pair)
+            .iter()
+            .all(|src_ip| *src_ip == network_path.local_ip),
+        "the client re-learned it"
+    );
+    pair.drive();
     assert_matches!(pair.poll(Client), None);
 }
 

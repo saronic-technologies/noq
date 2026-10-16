@@ -1,5 +1,6 @@
 //! Tests for multipath
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -1190,6 +1191,66 @@ fn network_change_server_no_hint_recovers() -> TestResult {
     // Neither path should be abandoned.
     assert_matches!(pair.poll(Server), None);
     assert_matches!(pair.poll(Client), None);
+
+    Ok(())
+}
+
+/// The network change hint sees the local IP a path last used, also when an earlier network
+/// change cleared it and no packet taught it again yet.
+#[test]
+fn network_change_hint_sees_last_local_ip() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    pair.drive();
+    let path_zero = pair.network_path(Client, PathId::ZERO)?;
+    assert!(
+        path_zero.local_ip.is_some(),
+        "the client knows its local IP"
+    );
+
+    #[derive(Debug, Default)]
+    struct RecordingHint(RefCell<Vec<FourTuple>>);
+    impl NetworkChangeHint for RecordingHint {
+        fn is_path_recoverable(&self, _path_id: PathId, network_path: FourTuple) -> bool {
+            self.0.borrow_mut().push(network_path);
+            true
+        }
+    }
+    let hint = RecordingHint::default();
+    pair.handle_network_change(Client, Some(&hint));
+    pair.handle_network_change(Client, Some(&hint));
+    assert_eq!(*hint.0.borrow(), [path_zero, path_zero]);
+
+    Ok(())
+}
+
+/// [`Connection::open_path_ensure`] matches a path by the local IP it last used, also after a
+/// network change cleared it, rather than opening a second path on the same network path.
+///
+/// [`Connection::open_path_ensure`]: crate::Connection::open_path_ensure
+#[test]
+fn open_path_ensure_after_network_change() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    pair.drive();
+    let path_zero = pair.network_path(Client, PathId::ZERO)?;
+    assert!(
+        path_zero.local_ip.is_some(),
+        "the client knows its local IP"
+    );
+
+    #[derive(Debug)]
+    struct Recoverable;
+    impl NetworkChangeHint for Recoverable {
+        fn is_path_recoverable(&self, _path_id: PathId, _network_path: FourTuple) -> bool {
+            true
+        }
+    }
+    pair.handle_network_change(Client, Some(&Recoverable));
+    assert_eq!(
+        pair.open_path_ensure(Client, path_zero, PathStatus::Available)?,
+        (PathId::ZERO, true)
+    );
 
     Ok(())
 }

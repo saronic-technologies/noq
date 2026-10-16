@@ -529,13 +529,15 @@ impl Connection {
     /// If `network_path` has no local IP set, then this will open a new path
     /// if no path exists for this remote address, independent of the existing
     /// path's local IP. If a local IP is set, it will match against the full
-    /// four-tuple of existing paths. Not setting the local IP avoids having to
-    /// guess which local interface will be used to communicate with the remote,
-    /// should it not be known yet. We assume that if we already have a path to
-    /// the remote, the OS is likely to use the same interface to talk to said remote.
+    /// four-tuple of existing paths, as reported by [`network_path`]. Not setting
+    /// the local IP avoids having to guess which local interface will be used to
+    /// communicate with the remote, should it not be known yet. We assume that if
+    /// we already have a path to the remote, the OS is likely to use the same
+    /// interface to talk to said remote.
     ///
     /// See also [`open_path`].
     ///
+    /// [`network_path`]: Connection::network_path
     /// [`open_path`]: Connection::open_path
     pub fn open_path_ensure(
         &mut self,
@@ -544,7 +546,7 @@ impl Connection {
         now: Instant,
     ) -> Result<(PathId, bool), PathError> {
         let existing_open_path = self.paths.iter().find(|(id, path)| {
-            network_path.is_probably_same_path(&path.data.network_path)
+            network_path.is_probably_same_path(&path.data.known_network_path())
                 && !self.abandoned_paths.contains(id)
         });
         match existing_open_path {
@@ -807,9 +809,12 @@ impl Connection {
     }
 
     /// Returns the path's network path represented as a 4-tuple.
+    ///
+    /// After a network change the OS picks the source address until the peer's packets show
+    /// which local IP the path uses. Until then this reports the local IP the path last used.
     pub fn network_path(&self, path_id: PathId) -> Result<FourTuple, ClosedPath> {
         self.path(path_id)
-            .map(|path| path.network_path)
+            .map(PathData::known_network_path)
             .ok_or(ClosedPath { _private: () })
     }
 
@@ -820,7 +825,8 @@ impl Connection {
     /// some of them. The network path is `None` until the path is established
     /// ([`PathEvent::Established`]; [`PathId::ZERO`] is established from the start). While a
     /// migration to a new network path awaits validation ([`PathEvent::Migrated`]), the
-    /// previous validated network path is reported, or `None` if there is none.
+    /// previous validated network path is reported, or `None` if there is none. Like
+    /// [`Self::network_path`], it reports the local IP a path last used across network changes.
     pub fn open_paths(&self) -> Vec<(PathId, Option<FourTuple>)> {
         self.paths
             .iter()
@@ -832,12 +838,12 @@ impl Connection {
                 let network_path = if !established {
                     None
                 } else if path.data.validated {
-                    Some(path.data.network_path)
+                    Some(path.data.known_network_path())
                 } else {
                     path.prev
                         .as_ref()
                         .filter(|(_, prev)| prev.validated)
-                        .map(|(_, prev)| prev.network_path)
+                        .map(|(_, prev)| prev.known_network_path())
                 };
                 (*path_id, network_path)
             })
@@ -5699,7 +5705,7 @@ impl Connection {
                 if mem::take(&mut path.data.unvalidated_migration) {
                     self.events.push_back(Event::Path(PathEvent::Migrated {
                         id: path_id,
-                        network_path: path.data.network_path,
+                        network_path: path.data.known_network_path(),
                     }));
                 }
             }
@@ -5906,9 +5912,9 @@ impl Connection {
             }
             open_paths += 1;
 
-            // Read the network path BEFORE clearing local_ip, so the hint can
-            // check which interface the path was using.
-            let network_path = path.data.network_path;
+            // Read the network path BEFORE clearing local_ip, so the hint can check which
+            // interface the path was using, even if an earlier network change cleared it.
+            let network_path = path.data.known_network_path();
 
             // Clear the local address for it to be obtained from the socket again. This applies to
             // all paths, regardless of being considered recoverable or not

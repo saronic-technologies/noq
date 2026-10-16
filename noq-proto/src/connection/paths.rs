@@ -414,6 +414,18 @@ impl PathData {
         }
     }
 
+    /// The network path with the local IP it last sent from.
+    ///
+    /// While a network change has cleared `network_path.local_ip`, this keeps the one the
+    /// peer still knows the path by. What reports or matches network paths uses this, so the
+    /// clearing doesn't show up as a change.
+    pub(super) fn known_network_path(&self) -> FourTuple {
+        FourTuple {
+            local_ip: self.network_path.local_ip.or(self.last_local_ip),
+            ..self.network_path
+        }
+    }
+
     /// Whether we're in the process of validating this path with PATH_CHALLENGEs
     pub(super) fn is_validating_path(&self) -> bool {
         !self.unconfirmed_challenges.is_empty() || self.pending_challenge
